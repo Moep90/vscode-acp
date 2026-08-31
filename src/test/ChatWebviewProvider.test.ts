@@ -171,4 +171,81 @@ suite('Chat webview message grouping', () => {
 			harness.dispose();
 		}
 	});
+
+	test('renders a collapsed diff for a file edit and expands it on click', () => {
+		const harness = createWebviewHarness();
+		try {
+			sendToWebview(harness.dom, { type: 'promptStart' });
+			sessionUpdate(harness.dom, {
+				sessionUpdate: 'tool_call',
+				toolCallId: 'call-1',
+				title: 'patch (replace): notes.md',
+				status: 'pending',
+				content: [
+					{
+						type: 'diff',
+						path: 'notes.md',
+						oldText: 'alpha\nbeta',
+						newText: 'alpha\ngamma\ndelta',
+					},
+				],
+			});
+
+			const row = harness.dom.window.document.querySelector('.tool-call-inline');
+			const box = harness.dom.window.document.querySelector('.tc-diff');
+			assert.ok(row, 'tool call row exists');
+			assert.ok(box, 'diff container exists');
+			assert.ok(box!.classList.contains('collapsed'), 'diff starts collapsed');
+			assert.deepStrictEqual(textContents(harness.dom, '.tc-diff .line'), [
+				'-alpha',
+				'-beta',
+				'+alpha',
+				'+gamma',
+				'+delta',
+			]);
+			assert.strictEqual(
+				harness.dom.window.document.querySelector('.tc-diffstat')?.textContent,
+				'+3 -2',
+			);
+
+			(row as HTMLElement).click();
+			assert.ok(
+				!harness.dom.window.document.querySelector('.tc-diff')!.classList.contains('collapsed'),
+				'click expands the diff',
+			);
+		} finally {
+			harness.dispose();
+		}
+	});
+
+	test('keeps a single diff when the completed tool call repeats it', () => {
+		const harness = createWebviewHarness();
+		try {
+			sendToWebview(harness.dom, { type: 'promptStart' });
+			const content = [
+				{ type: 'diff', path: 'notes.md', oldText: 'alpha', newText: 'beta' },
+			];
+			sessionUpdate(harness.dom, {
+				sessionUpdate: 'tool_call',
+				toolCallId: 'call-1',
+				title: 'patch (replace): notes.md',
+				status: 'pending',
+				content,
+			});
+			sessionUpdate(harness.dom, {
+				sessionUpdate: 'tool_call_update',
+				toolCallId: 'call-1',
+				status: 'completed',
+				content,
+			});
+
+			assert.strictEqual(harness.dom.window.document.querySelectorAll('.tc-diff').length, 1);
+			assert.strictEqual(
+				harness.dom.window.document.querySelector('.tc-icon')?.className,
+				'tc-icon completed',
+			);
+		} finally {
+			harness.dispose();
+		}
+	});
 });
