@@ -32,6 +32,8 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private transcripts = new Map<string, SessionNotification[]>();
   /** Prompts still running, per session. */
   private inFlight = new Map<string, number>();
+  /** How many buffered updates the webview already shows, per session. */
+  private rendered = new Map<string, number>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -178,7 +180,12 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     const transcript = this.transcripts.get(update.sessionId) ?? [];
     transcript.push(update);
     if (transcript.length > TRANSCRIPT_LIMIT) {
-      transcript.splice(0, transcript.length - TRANSCRIPT_LIMIT);
+      const dropped = transcript.length - TRANSCRIPT_LIMIT;
+      transcript.splice(0, dropped);
+      const shown = this.rendered.get(update.sessionId);
+      if (shown !== undefined) {
+        this.rendered.set(update.sessionId, Math.max(0, shown - dropped));
+      }
     }
     this.transcripts.set(update.sessionId, transcript);
 
@@ -186,6 +193,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     // webview only ever shows one session at a time.
     const activeId = this.sessionManager.getActiveSessionId();
     if (update.sessionId !== activeId) { return; }
+    this.rendered.set(update.sessionId, transcript.length);
 
     this.postMessage({
       type: 'sessionUpdate',
@@ -319,23 +327,31 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private handleSelectSession(sessionId: string): void {
     const session = this.sessionManager.activateSession(sessionId);
     if (!session) { return; }
-    this.repaintFromTranscript(sessionId);
+    this.showSession(sessionId);
     this.postSessions();
   }
 
-  private repaintFromTranscript(sessionId: string): void {
-    this.postMessage({ type: 'loadSessionStart' });
-    for (const update of this.transcripts.get(sessionId) ?? []) {
+  /**
+   * Put a session on screen. The webview keeps the nodes it rendered before,
+   * so only the updates that arrived while the tab was in the background go
+   * over the wire.
+   */
+  private showSession(sessionId: string): void {
+    this.postMessage({ type: 'showSession', sessionId });
+    const transcript = this.transcripts.get(sessionId) ?? [];
+    const from = this.rendered.get(sessionId) ?? 0;
+    for (const update of transcript.slice(from)) {
       this.postMessage({
         type: 'sessionUpdate',
         update: update.update,
         sessionId: update.sessionId,
       });
     }
-    this.postMessage({ type: 'loadSessionEnd', ok: true });
-    if ((this.inFlight.get(sessionId) ?? 0) > 0) {
-      this.postMessage({ type: 'promptStart' });
-    }
+    this.rendered.set(sessionId, transcript.length);
+    this.postMessage({
+      type: 'processing',
+      busy: (this.inFlight.get(sessionId) ?? 0) > 0,
+    });
   }
 
   /**
@@ -348,10 +364,12 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     this.transcripts.delete(sessionId);
     this.inFlight.delete(sessionId);
     this.pendingPrompts.delete(sessionId);
+    this.rendered.delete(sessionId);
+    this.postMessage({ type: 'forgetSession', sessionId });
 
     const activeId = this.sessionManager.getActiveSessionId();
     if (activeId) {
-      this.repaintFromTranscript(activeId);
+      this.showSession(activeId);
     } else {
       this.clearChat();
     }
@@ -495,6 +513,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    * Notify webview of a new active session.
    */
   notifyActiveSessionChanged(): void {
+    const activeId = this.sessionManager.getActiveSessionId();
+    if (activeId) {
+      this.showSession(activeId);
+    }
     this.sendCurrentState();
     this.postSessions();
   }
@@ -1596,6 +1618,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
 
       if (hasActiveSession && sessionState) {
         showSessionConnectedFromState(sessionState);
+        // The restored nodes belong to this session, so switching to it later
+        // is a no-op instead of a wipe.
+        shownSessionId = sessionState.sessionId || null;
       }
 
       const assistantItems = [];
@@ -2542,6 +2567,95 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       sessionTabs.appendChild(add);
     }
 
+    // Switching tabs used to replay every buffered update of the target
+    // session. Instead each session keeps its rendered nodes and its per-turn
+    // pointers here, and the extension only sends what happened while the tab
+    // was in the background.
+    const sessionViews = new Map();
+    let shownSessionId = null;
+
+    function captureSessionView() {
+      const nodes = document.createDocumentFragment();
+      while (messagesEl.firstChild) {
+        if (messagesEl.firstChild === emptyState) {
+          messagesEl.removeChild(messagesEl.firstChild);
+          continue;
+        }
+        nodes.appendChild(messagesEl.firstChild);
+      }
+      return {
+        nodes,
+        state: {
+          chatHistory,
+          isProcessing,
+          currentAssistantEl,
+          currentAssistantText,
+          currentAssistantMessageId,
+          replayUserMessageId,
+          pendingOptimisticUser,
+          currentTurnEl,
+          currentToolsListEl,
+          currentToolsCountEl,
+          currentToolCount,
+          toolCalls,
+          currentThoughtEl,
+          currentThoughtTextEl,
+          currentThoughtText,
+          currentThoughtMessageId,
+          thoughtStartTime,
+          thoughtEndTime,
+        },
+      };
+    }
+
+    function applySessionView(view) {
+      messagesEl.innerHTML = '';
+      if (emptyState) messagesEl.appendChild(emptyState);
+      const state = view ? view.state : {};
+      chatHistory = state.chatHistory || [];
+      currentAssistantEl = state.currentAssistantEl || null;
+      currentAssistantText = state.currentAssistantText || '';
+      currentAssistantMessageId = state.currentAssistantMessageId || null;
+      replayUserMessageId = state.replayUserMessageId || null;
+      pendingOptimisticUser = state.pendingOptimisticUser || null;
+      currentTurnEl = state.currentTurnEl || null;
+      currentToolsListEl = state.currentToolsListEl || null;
+      currentToolsCountEl = state.currentToolsCountEl || null;
+      currentToolCount = state.currentToolCount || 0;
+      toolCalls = state.toolCalls || {};
+      currentThoughtEl = state.currentThoughtEl || null;
+      currentThoughtTextEl = state.currentThoughtTextEl || null;
+      currentThoughtText = state.currentThoughtText || '';
+      currentThoughtMessageId = state.currentThoughtMessageId || null;
+      thoughtStartTime = state.thoughtStartTime || null;
+      thoughtEndTime = state.thoughtEndTime || null;
+      if (view) {
+        messagesEl.appendChild(view.nodes);
+        hideEmpty();
+      } else if (emptyState) {
+        emptyState.style.display = '';
+      }
+      setProcessing(!!state.isProcessing);
+      saveState();
+      scrollToBottom();
+    }
+
+    // The extension announces the switch, then sends the updates this session
+    // missed. Nothing is re-rendered that is already on screen.
+    function switchSessionView(sessionId) {
+      if (shownSessionId === sessionId) return;
+      if (shownSessionId) {
+        sessionViews.set(shownSessionId, captureSessionView());
+      }
+      applySessionView(sessionViews.get(sessionId));
+      shownSessionId = sessionId;
+    }
+
+    function forgetSessionView(sessionId) {
+      sessionViews.delete(sessionId);
+      if (shownSessionId === sessionId) shownSessionId = null;
+    }
+
     function hideEmpty() {
       if (emptyState) emptyState.style.display = 'none';
     }
@@ -2965,6 +3079,18 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           renderElicitation(msg);
         case 'sessions':
           renderSessionTabs(msg.sessions);
+          break;
+
+        case 'showSession':
+          switchSessionView(msg.sessionId);
+          break;
+
+        case 'processing':
+          setProcessing(!!msg.busy);
+          break;
+
+        case 'forgetSession':
+          forgetSessionView(msg.sessionId);
           break;
 
         case 'promptStart':

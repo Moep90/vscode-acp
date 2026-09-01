@@ -286,9 +286,8 @@ export class SessionManager extends EventEmitter {
     );
     this.agentSessions.set(agentName, sessionInfo.sessionId);
     this.activeSessionId = sessionInfo.sessionId;
-    // The new session starts empty; the previous one keeps its transcript in
-    // its own tab.
-    this.emit('clear-chat');
+    // The new session has nothing to show yet and the previous one keeps its
+    // rendered chat, so the view switch alone produces an empty chat.
     this.emit('active-session-changed', sessionInfo.sessionId);
     log(`New session ${sessionInfo.sessionId} for agent ${agentName}`);
     return sessionInfo;
