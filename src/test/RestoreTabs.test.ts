@@ -4,8 +4,8 @@ import * as vscode from 'vscode';
 import { OpenTabsStore } from '../core/OpenTabsStore';
 import { restoreOpenTabs } from '../core/restoreOpenTabs';
 
-function memento(): vscode.Memento {
-	const values = new Map<string, unknown>();
+function memento(seed?: Record<string, unknown>): vscode.Memento {
+	const values = new Map<string, unknown>(Object.entries(seed ?? {}));
 	return {
 		get: (key: string) => values.get(key),
 		update: async (key: string, value: unknown) => {
@@ -16,66 +16,74 @@ function memento(): vscode.Memento {
 }
 
 suite('Restoring the tab strip', () => {
-	test('remembers the open conversations and forgets them when none are left', () => {
+	test('remembers the open conversations with their labels and forgets an empty strip', () => {
 		const store = new OpenTabsStore(memento());
-		store.save({ agentName: 'Agent', sessionIds: ['a', 'b'], activeSessionId: 'b' });
+		store.save({
+			agentName: 'Agent',
+			tabs: [{ sessionId: 'a', label: 'Ports' }, { sessionId: 'b', label: 'Chat 2' }],
+			activeSessionId: 'b',
+		});
 
 		assert.deepStrictEqual(store.load(), {
 			agentName: 'Agent',
-			sessionIds: ['a', 'b'],
+			tabs: [{ sessionId: 'a', label: 'Ports' }, { sessionId: 'b', label: 'Chat 2' }],
 			activeSessionId: 'b',
 		});
 
-		store.save({ agentName: 'Agent', sessionIds: [], activeSessionId: null });
+		store.save({ agentName: 'Agent', tabs: [], activeSessionId: null });
 		assert.strictEqual(store.load(), undefined);
 	});
 
-	test('reopens every remembered conversation and returns to the active one', async () => {
-		const opened: string[] = [];
+	test('reads a snapshot written by the previous version', () => {
+		const store = new OpenTabsStore(memento({
+			'acp.openTabs': { version: 1, agentName: 'Agent', sessionIds: ['a'], activeSessionId: 'a' },
+		}));
+
+		assert.deepStrictEqual(store.load()?.tabs, [{ sessionId: 'a', label: 'Chat' }]);
+	});
+
+	test('loads the conversation that was in front and leaves the rest for later', async () => {
 		const live = new Set<string>();
-		let active: string | null = null;
+		let preferred: string | null = null;
 		const sessionManager = {
-			connectToAgent: async () => { live.add('a'); return { sessionId: 'a' }; },
-			getSession: (id: string) => (live.has(id) ? { sessionId: id } : undefined),
-			openStoredSession: async (_agent: string, id: string) => {
-				opened.push(id);
-				live.add(id);
-				return { sessionId: id };
+			setPreferredRestoreSession: (id: string | null) => { preferred = id; },
+			connectToAgent: async () => {
+				assert.strictEqual(preferred, 'b', 'the active session is the one to bring back');
+				live.add('b');
+				return { sessionId: 'b' };
 			},
-			activateSession: (id: string) => { active = id; return { sessionId: id }; },
+			getSession: (id: string) => (live.has(id) ? { sessionId: id } : undefined),
+			openStoredSession: async () => assert.fail('the other tabs stay closed until clicked'),
 			listLiveSessions: () => Array.from(live).map((id) => ({ sessionId: id })),
 		} as any;
 
-		await restoreOpenTabs(sessionManager, {
+		const pending = await restoreOpenTabs(sessionManager, {
 			agentName: 'Agent',
-			sessionIds: ['a', 'b', 'c'],
+			tabs: [
+				{ sessionId: 'a', label: 'Ports' },
+				{ sessionId: 'b', label: 'Subnets' },
+				{ sessionId: 'c', label: 'Notes' },
+			],
 			activeSessionId: 'b',
 		});
 
-		assert.deepStrictEqual(opened, ['b', 'c'], 'the session connecting brought back is not opened twice');
-		assert.strictEqual(active, 'b');
+		assert.deepStrictEqual(pending.map((tab) => tab.sessionId), ['a', 'c']);
 	});
 
-	test('skips a conversation the agent no longer knows', async () => {
-		const live = new Set<string>(['a']);
+	test('reports no tabs when the agent cannot be reached', async () => {
 		const sessionManager = {
-			connectToAgent: async () => ({ sessionId: 'a' }),
-			getSession: (id: string) => (live.has(id) ? { sessionId: id } : undefined),
-			openStoredSession: async (_agent: string, id: string) => {
-				if (id === 'gone') { throw new Error('unknown session'); }
-				live.add(id);
-				return { sessionId: id };
-			},
-			activateSession: () => undefined,
-			listLiveSessions: () => Array.from(live).map((id) => ({ sessionId: id })),
+			setPreferredRestoreSession: () => undefined,
+			connectToAgent: async () => { throw new Error('spawn failed'); },
+			getSession: () => undefined,
+			listLiveSessions: () => [],
 		} as any;
 
-		await restoreOpenTabs(sessionManager, {
+		const pending = await restoreOpenTabs(sessionManager, {
 			agentName: 'Agent',
-			sessionIds: ['a', 'gone', 'c'],
-			activeSessionId: 'gone',
+			tabs: [{ sessionId: 'a', label: 'Ports' }],
+			activeSessionId: 'a',
 		});
 
-		assert.deepStrictEqual(Array.from(live).sort(), ['a', 'c']);
+		assert.deepStrictEqual(pending, []);
 	});
 });

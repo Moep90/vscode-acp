@@ -34,6 +34,8 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private inFlight = new Map<string, number>();
   /** How many buffered updates the webview already shows, per session. */
   private rendered = new Map<string, number>();
+  /** Tabs from the previous window that are not loaded yet. */
+  private pendingRestores: Array<{ sessionId: string; label: string; agentName: string }> = [];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -99,7 +101,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         case 'elicitationResult':
           this.resolveElicitation(message.id, message.action, message.content);
         case 'selectSession':
-          this.handleSelectSession(message.sessionId);
+          await this.handleSelectSession(message.sessionId);
           break;
         case 'closeSession':
           await this.handleCloseSession(message.sessionId);
@@ -302,32 +304,65 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    * Send the tab strip: one entry per live session, marking which one is on
    * screen and which ones are working.
    */
+  /** Tabs to show for sessions that were open before the window reloaded. */
+  setPendingRestores(agentName: string, tabs: Array<{ sessionId: string; label: string }>): void {
+    this.pendingRestores = tabs.map((tab) => ({ ...tab, agentName }));
+    this.postSessions();
+  }
+
   postSessions(): void {
     const live = this.sessionManager.listLiveSessions();
     const liveIds = new Set(live.map((session) => session.sessionId));
+    this.pendingRestores = this.pendingRestores.filter((tab) => !liveIds.has(tab.sessionId));
     for (const sessionId of this.transcripts.keys()) {
       if (!liveIds.has(sessionId)) { this.transcripts.delete(sessionId); }
     }
     const activeId = this.sessionManager.getActiveSessionId();
     this.postMessage({
       type: 'sessions',
-      sessions: live.map((session, index) => ({
-        sessionId: session.sessionId,
-        label: session.title?.trim() || `Chat ${index + 1}`,
-        agentName: session.agentDisplayName,
-        active: session.sessionId === activeId,
-        busy: (this.inFlight.get(session.sessionId) ?? 0) > 0,
-      })),
+      sessions: [
+        ...live.map((session, index) => ({
+          sessionId: session.sessionId,
+          label: session.title?.trim() || `Chat ${index + 1}`,
+          agentName: session.agentDisplayName,
+          active: session.sessionId === activeId,
+          busy: (this.inFlight.get(session.sessionId) ?? 0) > 0,
+          pending: false,
+        })),
+        ...this.pendingRestores.map((tab) => ({
+          sessionId: tab.sessionId,
+          label: tab.label,
+          agentName: tab.agentName,
+          active: false,
+          busy: false,
+          pending: true,
+        })),
+      ],
     });
   }
 
   /**
    * Switch to a live session and repaint the chat from its buffered updates.
    */
-  private handleSelectSession(sessionId: string): void {
+  private async handleSelectSession(sessionId: string): Promise<void> {
     const session = this.sessionManager.activateSession(sessionId);
-    if (!session) { return; }
-    this.showSession(sessionId);
+    if (session) {
+      this.showSession(sessionId);
+      this.postSessions();
+      return;
+    }
+
+    // A tab from the previous window: its history is fetched now, on the
+    // first click, not while the window was starting up.
+    const waiting = this.pendingRestores.find((tab) => tab.sessionId === sessionId);
+    if (!waiting) { return; }
+    try {
+      await this.sessionManager.openStoredSession(waiting.agentName, sessionId);
+    } catch (e) {
+      logError(`Could not open conversation ${sessionId}`, e);
+      this.postMessage({ type: 'error', message: 'That conversation could not be opened.' });
+      this.pendingRestores = this.pendingRestores.filter((tab) => tab.sessionId !== sessionId);
+    }
     this.postSessions();
   }
 
@@ -360,6 +395,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    * or nothing when that was the last one.
    */
   private async handleCloseSession(sessionId: string): Promise<void> {
+    this.pendingRestores = this.pendingRestores.filter((tab) => tab.sessionId !== sessionId);
     await this.sessionManager.closeSession(sessionId);
     this.transcripts.delete(sessionId);
     this.inFlight.delete(sessionId);
@@ -1435,6 +1471,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .session-tab.pending { opacity: 0.6; font-style: italic; }
     .session-tab .close {
       flex-shrink: 0;
       opacity: 0.5;
@@ -2533,8 +2570,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       sessionTabs.classList.add('visible');
       for (const item of items) {
         const tab = document.createElement('button');
-        tab.className = 'session-tab' + (item.active ? ' active' : '');
-        tab.title = item.agentName ? item.agentName + ' — ' + item.label : item.label;
+        tab.className = 'session-tab' + (item.active ? ' active' : '') + (item.pending ? ' pending' : '');
+        tab.title = item.pending
+          ? item.label + ' (click to load)'
+          : (item.agentName ? item.agentName + ' — ' + item.label : item.label);
         if (item.busy) {
           const dot = document.createElement('span');
           dot.className = 'busy';

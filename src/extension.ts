@@ -72,21 +72,25 @@ export function activate(context: vscode.ExtensionContext): void {
     const live = sessionManager.listLiveSessions();
     openTabsStore.save({
       agentName: live[0]?.agentName ?? sessionManager.getActiveAgentName() ?? '',
-      sessionIds: live.map((session) => session.sessionId),
+      tabs: live.map((session, index) => ({
+        sessionId: session.sessionId,
+        label: session.title?.trim() || `Chat ${index + 1}`,
+      })),
       activeSessionId: sessionManager.getActiveSessionId(),
     });
   });
 
   const restored = openTabsStore.load();
-  if (restored?.sessionIds.length) {
+  if (restored?.tabs.length) {
     void vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Window,
-        title: `Restoring conversations with ${restored.agentName}...`,
+        title: `Restoring conversation with ${restored.agentName}...`,
       },
       async () => {
         try {
-          await restoreOpenTabs(sessionManager, restored);
+          const pending = await restoreOpenTabs(sessionManager, restored);
+          chatWebviewProvider.setPendingRestores(restored.agentName, pending);
         } catch (e: any) {
           logError('Failed to restore the previous conversations', e);
         }

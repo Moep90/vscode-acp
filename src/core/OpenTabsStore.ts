@@ -2,14 +2,25 @@ import * as vscode from 'vscode';
 
 const STATE_KEY = 'acp.openTabs';
 
+export interface OpenTab {
+  sessionId: string;
+  label: string;
+}
+
 export interface OpenTabsSnapshot {
   agentName: string;
-  sessionIds: string[];
+  tabs: OpenTab[];
   activeSessionId: string | null;
 }
 
-interface PersistedShape extends OpenTabsSnapshot {
-  version: 1;
+interface PersistedShape {
+  version: 1 | 2;
+  agentName: string;
+  activeSessionId: string | null;
+  /** Version 2. */
+  tabs?: OpenTab[];
+  /** Version 1, kept so an older snapshot still restores. */
+  sessionIds?: string[];
 }
 
 /**
@@ -22,22 +33,30 @@ export class OpenTabsStore {
 
   load(): OpenTabsSnapshot | undefined {
     const raw = this.workspaceState.get<PersistedShape>(STATE_KEY);
-    if (!raw || raw.version !== 1 || !Array.isArray(raw.sessionIds) || !raw.agentName) {
+    if (!raw || !raw.agentName) {
+      return undefined;
+    }
+    const tabs: OpenTab[] = Array.isArray(raw.tabs)
+      ? raw.tabs.filter((tab) => tab && typeof tab.sessionId === 'string')
+      : (raw.sessionIds ?? [])
+        .filter((id) => typeof id === 'string')
+        .map((sessionId) => ({ sessionId, label: 'Chat' }));
+    if (!tabs.length) {
       return undefined;
     }
     return {
       agentName: raw.agentName,
-      sessionIds: raw.sessionIds.filter((id) => typeof id === 'string'),
+      tabs,
       activeSessionId: raw.activeSessionId ?? null,
     };
   }
 
   save(snapshot: OpenTabsSnapshot): void {
-    if (!snapshot.sessionIds.length) {
+    if (!snapshot.tabs.length) {
       void this.workspaceState.update(STATE_KEY, undefined);
       return;
     }
-    const value: PersistedShape = { version: 1, ...snapshot };
+    const value: PersistedShape = { version: 2, ...snapshot };
     void this.workspaceState.update(STATE_KEY, value);
   }
 }

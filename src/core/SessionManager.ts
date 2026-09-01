@@ -345,10 +345,29 @@ export class SessionManager extends EventEmitter {
    * when the agent cannot list or replay sessions, when it has none here, or
    * when the attempt fails — the caller then starts a fresh session.
    */
+  /**
+   * Session to bring back on the next connect, set by the tab restore before
+   * connecting. Consumed once, so a later connect picks the newest again.
+   */
+  private preferredRestoreSessionId: string | null = null;
+
+  setPreferredRestoreSession(sessionId: string | null): void {
+    this.preferredRestoreSessionId = sessionId;
+  }
+
   private async restoreLatestSession(
     agentName: string,
     cwd: string,
   ): Promise<SessionInfo | null> {
+    const preferred = this.preferredRestoreSessionId;
+    this.preferredRestoreSessionId = null;
+    if (preferred) {
+      try {
+        return await this.openStoredSession(agentName, preferred);
+      } catch (e) {
+        logError(`Could not continue session ${preferred} for "${agentName}"`, e);
+      }
+    }
     const latest = (await this.listResumableSessions(agentName, cwd))[0];
     if (!latest?.sessionId) {
       return null;

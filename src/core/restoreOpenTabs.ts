@@ -1,40 +1,29 @@
 import type { SessionManager } from './SessionManager';
-import type { OpenTabsSnapshot } from './OpenTabsStore';
+import type { OpenTab, OpenTabsSnapshot } from './OpenTabsStore';
 import { log, logError } from '../utils/Logger';
 
-/** Restoring more than this at once would replay a lot of history at startup. */
-const MAX_RESTORED_TABS = 5;
-
 /**
- * Reopen the conversations that were in the tab strip before the window was
- * reloaded. Sessions the agent no longer knows are skipped; connecting is left
- * to the caller's error handling.
+ * Bring back the conversation that was in front before the window reloaded and
+ * report the other tabs, which stay unloaded until the user opens one.
  */
 export async function restoreOpenTabs(
   sessionManager: SessionManager,
   snapshot: OpenTabsSnapshot,
-): Promise<void> {
-  const wanted = snapshot.sessionIds.slice(-MAX_RESTORED_TABS);
-  if (!wanted.length) {
-    return;
+): Promise<OpenTab[]> {
+  if (!snapshot.tabs.length) {
+    return [];
   }
 
-  await sessionManager.connectToAgent(snapshot.agentName);
-
-  for (const sessionId of wanted) {
-    if (sessionManager.getSession(sessionId)) {
-      continue;
-    }
-    try {
-      await sessionManager.openStoredSession(snapshot.agentName, sessionId);
-    } catch (e) {
-      logError(`Could not reopen conversation ${sessionId}`, e);
-    }
+  sessionManager.setPreferredRestoreSession(snapshot.activeSessionId);
+  try {
+    await sessionManager.connectToAgent(snapshot.agentName);
+  } catch (e) {
+    sessionManager.setPreferredRestoreSession(null);
+    logError(`Could not reconnect "${snapshot.agentName}"`, e);
+    return [];
   }
 
-  const active = snapshot.activeSessionId;
-  if (active && sessionManager.getSession(active)) {
-    sessionManager.activateSession(active);
-  }
-  log(`Restored ${sessionManager.listLiveSessions().length} conversation(s)`);
+  const pending = snapshot.tabs.filter((tab) => !sessionManager.getSession(tab.sessionId));
+  log(`Restored the active conversation, ${pending.length} tab(s) wait to be opened`);
+  return pending;
 }
