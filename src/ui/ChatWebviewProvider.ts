@@ -2674,6 +2674,15 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     // Ensure the current turn has a tools container
+    // Tool calls are collected into the group that belongs to the message or
+    // thought above them. Starting a new block closes the current group so the
+    // next call opens a fresh one in document order.
+    function startToolGroup() {
+      currentToolsListEl = null;
+      currentToolsCountEl = null;
+      currentToolCount = 0;
+    }
+
     function ensureTurnTools() {
       if (!currentTurnEl) {
         // Create turn container if none (e.g., tool call before first text)
@@ -3117,12 +3126,17 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           setProcessing(false);
           pendingOptimisticUser = null;
           replayUserMessageId = null;
-          // Auto-collapse tool calls in completed turns
-          if (currentToolsListEl && currentToolCount > 3) {
-            currentToolsListEl.classList.add('collapsed');
-            if (currentToolsCountEl) {
-              currentToolsCountEl.dataset.count = String(currentToolCount);
-              currentToolsCountEl.textContent = '▸ ' + currentToolCount + ' tool calls';
+          // Auto-collapse the long tool groups of a completed turn
+          if (currentTurnEl) {
+            const groups = currentTurnEl.querySelectorAll('.turn-tools');
+            for (let g = 0; g < groups.length; g++) {
+              const summary = groups[g].querySelector('.turn-tools-summary');
+              const list = groups[g].querySelector('.turn-tools-list');
+              const count = parseInt((summary && summary.dataset.count) || '0', 10);
+              if (list && count > 3) {
+                list.classList.add('collapsed');
+                summary.textContent = '▸ ' + count + ' tool calls';
+              }
             }
           }
           currentTurnEl = null;
@@ -3263,7 +3277,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
               }
               currentAssistantEl = document.createElement('div');
               currentAssistantEl.className = 'message assistant';
-              currentTurnEl.insertBefore(currentAssistantEl, currentTurnEl.querySelector('.turn-tools'));
+              currentTurnEl.appendChild(currentAssistantEl);
+              // The next tool calls belong to this message, so they open their
+              // own group underneath it.
+              startToolGroup();
             }
             currentAssistantEl.textContent = currentAssistantText;
             scrollToBottom();
@@ -3325,7 +3342,8 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
                 '<summary><span class="thought-indicator"></span> Thinking\u2026</summary>' +
                 '<div class="thought-content"></div>';
               currentThoughtTextEl = currentThoughtEl.querySelector('.thought-content');
-              currentTurnEl.insertBefore(currentThoughtEl, currentTurnEl.querySelector('.turn-tools'));
+              currentTurnEl.appendChild(currentThoughtEl);
+              startToolGroup();
               thoughtStartTime = Date.now();
               currentThoughtText = '';
               currentThoughtMessageId = messageId;
