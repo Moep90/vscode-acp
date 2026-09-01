@@ -6,6 +6,8 @@ import { SessionManager } from './core/SessionManager';
 import { SessionHistoryStore } from './core/SessionHistoryStore';
 import { SessionUpdateHandler } from './handlers/SessionUpdateHandler';
 import { ElicitationHandler } from './handlers/ElicitationHandler';
+import { OpenTabsStore } from './core/OpenTabsStore';
+import { restoreOpenTabs } from './core/restoreOpenTabs';
 import { SessionTreeProvider } from './ui/SessionTreeProvider';
 import { StatusBarManager } from './ui/StatusBarManager';
 import { ChatWebviewProvider } from './ui/ChatWebviewProvider';
@@ -62,10 +64,35 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const statusBarManager = new StatusBarManager(sessionManager);
 
-  // Notify chat webview when active session changes
+  // Remember which conversations are open so a window reload can rebuild the
+  // tab strip, and notify the chat webview about the change.
+  const openTabsStore = new OpenTabsStore(context.workspaceState);
   sessionManager.on('active-session-changed', () => {
     chatWebviewProvider.notifyActiveSessionChanged();
+    const live = sessionManager.listLiveSessions();
+    openTabsStore.save({
+      agentName: live[0]?.agentName ?? sessionManager.getActiveAgentName() ?? '',
+      sessionIds: live.map((session) => session.sessionId),
+      activeSessionId: sessionManager.getActiveSessionId(),
+    });
   });
+
+  const restored = openTabsStore.load();
+  if (restored?.sessionIds.length) {
+    void vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: `Restoring conversations with ${restored.agentName}...`,
+      },
+      async () => {
+        try {
+          await restoreOpenTabs(sessionManager, restored);
+        } catch (e: any) {
+          logError('Failed to restore the previous conversations', e);
+        }
+      },
+    );
+  }
 
   // Clear chat when new conversation is started
   sessionManager.on('clear-chat', () => {
