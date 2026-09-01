@@ -4,6 +4,25 @@ A [Visual Studio Code extension](https://marketplace.visualstudio.com/items?item
 
 ![ACP Client Screenshot](resources/screenshot.png)
 
+## About this fork
+
+This is a fork of [formulahendry/vscode-acp](https://github.com/formulahendry/vscode-acp) with changes that are not in the published extension. The `main` branch carries all of them merged; each one also lives on its own branch off upstream `main` so it can be offered upstream separately.
+
+- **Type and send while the agent works.** The composer stays enabled for the whole turn and Enter always sends. A prompt sent mid-turn waits for the running turn by default; `acp.chat.midRunPrompt: "send"` hands it to the agent right away, which agents that steer a running turn apply to it.
+- **File edit diffs on the tool call.** A tool call that edits a file shows the added and removed line counts and holds the diff, collapsed until the row is clicked. No editor tab is opened.
+- **Questions from the agent.** The client advertises elicitation form support and renders a request in the chat: a single choice becomes buttons, anything else a small form built from the schema.
+- **Sessions side by side.** A new conversation opens another session on the connection that is already there instead of killing the agent process. A tab strip shows one tab per live session and marks the ones that are working.
+- **Continue where you left off.** Connecting to an agent continues the most recent session of the current folder instead of opening an empty one, falling back to a fresh session when there is nothing to continue.
+- **Message boundaries in the chat** ([#56](https://github.com/formulahendry/vscode-acp/pull/56) by @gandazgul), so consecutive agent messages of one turn are no longer concatenated into a single block.
+
+Build and install it locally:
+
+```bash
+npm ci
+npx vsce package
+code --install-extension acp-client-*.vsix --force
+```
+
 ## Features
 
 - **Multi-Agent Support**: Connect to 11 pre-configured ACP agents or add your own
