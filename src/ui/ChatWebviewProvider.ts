@@ -467,10 +467,6 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    * Notify webview of a new active session.
    */
   notifyActiveSessionChanged(): void {
-    const activeId = this.sessionManager.getActiveSessionId();
-    if (activeId && !this.transcripts.get(activeId)?.length) {
-      this.clearChat();
-    }
     this.sendCurrentState();
     this.postSessions();
   }

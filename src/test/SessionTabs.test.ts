@@ -81,6 +81,50 @@ suite('Live sessions', () => {
 });
 
 suite('Session tabs', () => {
+	test('a session change does not wipe the chat restored after a reload', () => {
+		const posted: any[] = [];
+		const sessionManager = {
+			getActiveSessionId: () => 'session-1',
+			getSession: () => undefined,
+			listLiveSessions: () => [],
+		} as any;
+		const provider = new ChatWebviewProvider(
+			vscode.Uri.file('/tmp/acp-client-test'),
+			sessionManager,
+			new SessionUpdateHandler(),
+		);
+		const view = {
+			webview: {
+				options: {},
+				html: '',
+				cspSource: 'test-source',
+				asWebviewUri: (uri: vscode.Uri) => uri,
+				onDidReceiveMessage: () => ({ dispose: () => undefined }),
+				postMessage: async (message: any) => { posted.push(message); return true; },
+			},
+			onDidDispose: () => ({ dispose: () => undefined }),
+			show: () => undefined,
+		} as unknown as vscode.WebviewView;
+
+		try {
+			provider.resolveWebviewView(view, {} as any, {} as any);
+			posted.length = 0;
+
+			// After a reload the client has no buffered updates for the session
+			// the webview restored from its own saved state.
+			provider.notifyActiveSessionChanged();
+
+			assert.deepStrictEqual(
+				posted.filter((message) => message.type === 'clearChat'),
+				[],
+				'the restored transcript survives',
+			);
+			assert.ok(posted.some((message) => message.type === 'state'));
+		} finally {
+			provider.dispose();
+		}
+	});
+
 	test('renders one tab per session and reports the clicked one', () => {
 		const updateHandler = new SessionUpdateHandler();
 		const provider = new ChatWebviewProvider(

@@ -266,6 +266,9 @@ export class SessionManager extends EventEmitter {
     );
     this.agentSessions.set(agentName, sessionInfo.sessionId);
     this.activeSessionId = sessionInfo.sessionId;
+    // The new session starts empty; the previous one keeps its transcript in
+    // its own tab.
+    this.emit('clear-chat');
     this.emit('active-session-changed', sessionInfo.sessionId);
     log(`New session ${sessionInfo.sessionId} for agent ${agentName}`);
     return sessionInfo;
