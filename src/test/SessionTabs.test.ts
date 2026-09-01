@@ -80,6 +80,75 @@ suite('Live sessions', () => {
 	});
 });
 
+suite('Closing and reopening', () => {
+	test('closing a tab drops the session and hands over to another one', async () => {
+		const { manager, killed } = seededManager();
+		await manager.newConversation();
+		assert.strictEqual(manager.getActiveSessionId(), 'session-2');
+
+		await manager.closeSession('session-2');
+
+		assert.deepStrictEqual(killed, [], 'the agent process keeps running');
+		assert.deepStrictEqual(
+			manager.listLiveSessions().map((session: any) => session.sessionId),
+			['session-1'],
+		);
+		assert.strictEqual(manager.getActiveSessionId(), 'session-1');
+
+		await manager.closeSession('session-1');
+		assert.deepStrictEqual(manager.listLiveSessions(), []);
+		assert.strictEqual(manager.getActiveSessionId(), null);
+	});
+
+	test('closing asks the agent only when it supports session/close', async () => {
+		const { manager } = seededManager();
+		const asked: string[] = [];
+		(manager as any).connectionManager.getConnection = (agentId: string) =>
+			agentId === 'agent-1'
+				? {
+					connection: {
+						newSession: async () => ({ sessionId: 'unused' }),
+						closeSession: async ({ sessionId }: { sessionId: string }) => { asked.push(sessionId); },
+					},
+					initResponse: {},
+				}
+				: undefined;
+
+		await manager.closeSession('session-1');
+		assert.deepStrictEqual(asked, [], 'no capability, no call');
+
+		(manager as any).sessions.set('session-1', {
+			sessionId: 'session-1', agentId: 'agent-1', agentName: 'Agent', agentDisplayName: 'Agent',
+			cwd: '/tmp', createdAt: new Date().toISOString(), initResponse: {} as any,
+			modes: null, models: null, configOptions: null, availableCommands: [],
+		});
+		(manager as any).capabilities.set('Agent', { list: true, load: false, resume: true, close: true });
+		await manager.closeSession('session-1');
+		assert.deepStrictEqual(asked, ['session-1']);
+	});
+
+	test('the reopen list skips sessions that are already open', async () => {
+		const { manager } = seededManager();
+		await manager.newConversation();
+		(manager as any).capabilities.set('Agent', { list: true, load: false, resume: true, close: false });
+		(manager as any).listSessions = async () => ({
+			sessions: [
+				{ sessionId: 'session-1', updatedAt: '2026-09-01T05:00:00Z' },
+				{ sessionId: 'stored-old', updatedAt: '2026-08-30T05:00:00Z' },
+				{ sessionId: 'stored-new', updatedAt: '2026-08-31T05:00:00Z' },
+			],
+		});
+
+		const offered = await manager.listResumableSessions('Agent', '/work');
+
+		assert.deepStrictEqual(
+			offered.map((session: any) => session.sessionId),
+			['stored-new', 'stored-old'],
+			'open sessions are gone and the rest is newest first',
+		);
+	});
+});
+
 suite('Session tabs', () => {
 	test('a session change does not wipe the chat restored after a reload', () => {
 		const posted: any[] = [];
@@ -179,6 +248,17 @@ suite('Session tabs', () => {
 				type: 'selectSession',
 				sessionId: 'session-1',
 			});
+
+			(tabs[1].querySelector('.close') as HTMLElement).click();
+			assert.deepStrictEqual(JSON.parse(JSON.stringify(posted[posted.length - 1])), {
+				type: 'closeSession',
+				sessionId: 'session-2',
+			});
+			assert.strictEqual(
+				posted.filter((m) => m.type === 'selectSession').length,
+				1,
+				'the close button does not also switch tabs',
+			);
 		} finally {
 			dom.window.close();
 			provider.dispose();

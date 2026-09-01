@@ -53,6 +53,7 @@ export interface AgentCapabilitySummary {
   list: boolean;
   load: boolean;
   resume: boolean;
+  close: boolean;
 }
 
 /**
@@ -136,6 +137,7 @@ export class SessionManager extends EventEmitter {
       list: !!sc?.list,
       load: !!(caps as any)?.loadSession,
       resume: !!sc?.resume,
+      close: !!sc?.close,
     };
   }
 
@@ -348,25 +350,81 @@ export class SessionManager extends EventEmitter {
     agentName: string,
     cwd: string,
   ): Promise<SessionInfo | null> {
-    const caps = this.capabilities.get(agentName);
-    if (!caps?.list || (!caps.load && !caps.resume)) {
+    const latest = (await this.listResumableSessions(agentName, cwd))[0];
+    if (!latest?.sessionId) {
       return null;
     }
     try {
-      const { sessions } = await this.listSessions(agentName, { cwd });
-      const latest = [...(sessions ?? [])].sort(
-        (a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? ''),
-      )[0];
-      if (!latest?.sessionId) {
-        return null;
-      }
-      return caps.load
-        ? await this.loadSession(agentName, latest.sessionId)
-        : await this.resumeSession(agentName, latest.sessionId);
+      return await this.openStoredSession(agentName, latest.sessionId);
     } catch (e) {
       logError(`Could not continue the last session for "${agentName}"`, e);
       return null;
     }
+  }
+
+  /**
+   * Sessions of this folder that the agent can replay and that are not
+   * already open, newest first. Empty when the agent cannot list or replay,
+   * or when the listing fails.
+   */
+  async listResumableSessions(agentName: string, cwd: string): Promise<ProtocolSessionInfo[]> {
+    const caps = this.capabilities.get(agentName);
+    if (!caps?.list || (!caps.load && !caps.resume)) {
+      return [];
+    }
+    const open = new Set(this.listLiveSessions().map((session) => session.sessionId));
+    try {
+      const { sessions } = await this.listSessions(agentName, { cwd });
+      return [...(sessions ?? [])]
+        .filter((session) => !open.has(session.sessionId))
+        .sort((a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? ''));
+    } catch (e) {
+      logError(`Could not list sessions for "${agentName}"`, e);
+      return [];
+    }
+  }
+
+  /** Reopen a stored session, replaying it the way the agent supports. */
+  async openStoredSession(agentName: string, sessionId: string): Promise<SessionInfo> {
+    const caps = this.capabilities.get(agentName);
+    return caps?.load
+      ? this.loadSession(agentName, sessionId)
+      : this.resumeSession(agentName, sessionId);
+  }
+
+  /**
+   * Close one session: tell the agent when it supports session/close, drop it
+   * from the live list either way, and move the active pointer to another
+   * live session. The session stays stored, so it can be reopened later.
+   */
+  async closeSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) { return; }
+
+    const conn = this.connectionManager.getConnection(session.agentId);
+    if (conn && this.capabilities.get(session.agentName)?.close) {
+      try {
+        await conn.connection.closeSession({ sessionId });
+      } catch (e) {
+        logError(`Agent "${session.agentName}" failed to close session ${sessionId}`, e);
+      }
+    }
+
+    this.sessions.delete(sessionId);
+    if (this.agentSessions.get(session.agentName) === sessionId) {
+      this.agentSessions.delete(session.agentName);
+    }
+
+    if (this.activeSessionId === sessionId) {
+      const next = this.listLiveSessions().find(
+        (candidate) => candidate.agentName === session.agentName,
+      ) ?? this.listLiveSessions()[0] ?? null;
+      this.activeSessionId = next?.sessionId ?? null;
+      if (next) {
+        this.agentSessions.set(next.agentName, next.sessionId);
+      }
+    }
+    this.emit('active-session-changed', this.activeSessionId);
   }
 
   /**

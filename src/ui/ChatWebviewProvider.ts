@@ -99,6 +99,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         case 'selectSession':
           this.handleSelectSession(message.sessionId);
           break;
+        case 'closeSession':
+          await this.handleCloseSession(message.sessionId);
+          break;
         case 'setMode':
           await this.handleSetMode(message.modeId);
           break;
@@ -316,6 +319,11 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private handleSelectSession(sessionId: string): void {
     const session = this.sessionManager.activateSession(sessionId);
     if (!session) { return; }
+    this.repaintFromTranscript(sessionId);
+    this.postSessions();
+  }
+
+  private repaintFromTranscript(sessionId: string): void {
     this.postMessage({ type: 'loadSessionStart' });
     for (const update of this.transcripts.get(sessionId) ?? []) {
       this.postMessage({
@@ -328,6 +336,26 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     if ((this.inFlight.get(sessionId) ?? 0) > 0) {
       this.postMessage({ type: 'promptStart' });
     }
+  }
+
+  /**
+   * Close a tab. The session is dropped from the live list and its buffered
+   * transcript goes with it; the chat then shows whichever session took over,
+   * or nothing when that was the last one.
+   */
+  private async handleCloseSession(sessionId: string): Promise<void> {
+    await this.sessionManager.closeSession(sessionId);
+    this.transcripts.delete(sessionId);
+    this.inFlight.delete(sessionId);
+    this.pendingPrompts.delete(sessionId);
+
+    const activeId = this.sessionManager.getActiveSessionId();
+    if (activeId) {
+      this.repaintFromTranscript(activeId);
+    } else {
+      this.clearChat();
+    }
+    this.sendCurrentState();
     this.postSessions();
   }
 
@@ -1385,6 +1413,12 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .session-tab .close {
+      flex-shrink: 0;
+      opacity: 0.5;
+      padding: 0 1px;
+    }
+    .session-tab .close:hover { opacity: 1; }
     .session-tab .busy {
       flex-shrink: 0;
       width: 6px;
@@ -2485,6 +2519,15 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         label.className = 'label';
         label.textContent = item.label;
         tab.appendChild(label);
+        const close = document.createElement('span');
+        close.className = 'close';
+        close.textContent = '×';
+        close.title = 'Close conversation';
+        close.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ type: 'closeSession', sessionId: item.sessionId });
+        });
+        tab.appendChild(close);
         tab.addEventListener('click', () => {
           if (item.active) return;
           vscode.postMessage({ type: 'selectSession', sessionId: item.sessionId });

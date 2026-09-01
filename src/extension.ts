@@ -173,20 +173,50 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    // Offer the sessions of this folder that are not already open before
+    // starting an empty one.
+    const agentName = activeSession.agentName;
+    const previous = await sessionManager.listResumableSessions(agentName, workspaceCwd() ?? '');
+    let reopenSessionId: string | undefined;
+    if (previous.length) {
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: '$(add) New session', description: 'Start an empty conversation', sessionId: undefined as string | undefined },
+          ...previous.map((session) => ({
+            label: session.title?.trim() || session.sessionId,
+            description: session.updatedAt ? new Date(session.updatedAt).toLocaleString() : undefined,
+            sessionId: session.sessionId,
+          })),
+        ],
+        {
+          title: `New chat with ${activeSession.agentDisplayName}`,
+          placeHolder: 'Continue an earlier conversation or start a new one',
+        },
+      );
+      if (!pick) { return; }
+      reopenSessionId = pick.sessionId;
+    }
+
     try {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: `Starting new conversation with ${activeSession.agentDisplayName}...`,
+          title: reopenSessionId
+            ? `Opening conversation with ${activeSession.agentDisplayName}...`
+            : `Starting new conversation with ${activeSession.agentDisplayName}...`,
           cancellable: false,
         },
         async () => {
-          await sessionManager.newConversation();
+          if (reopenSessionId) {
+            await sessionManager.openStoredSession(agentName, reopenSessionId);
+          } else {
+            await sessionManager.newConversation();
+          }
         },
       );
     } catch (e: any) {
-      logError('Failed to start new conversation', e);
-      vscode.window.showErrorMessage(`Failed to start new conversation: ${e.message}`);
+      logError('Failed to open conversation', e);
+      vscode.window.showErrorMessage(`Failed to open conversation: ${e.message}`);
     }
   });
 
@@ -324,16 +354,6 @@ export function activate(context: vscode.ExtensionContext): void {
     if (sessionManager.getActiveSessionId() === sessionId) {
       vscode.commands.executeCommand('acp-chat.focus');
       return;
-    }
-
-    // Confirm if there's existing chat content with a different active session.
-    if (chatWebviewProvider.hasChatContent) {
-      const choice = await vscode.window.showWarningMessage(
-        'Open a different session? This will replace the current chat history.',
-        'Open Session',
-        'Cancel',
-      );
-      if (choice !== 'Open Session') { return; }
     }
 
     try {
